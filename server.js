@@ -155,10 +155,14 @@ function proxySportradarRequest(req, res, srHost, srPath) {
         contentType.includes("text")
       ) {
         body = rewriteSportradarUrls(raw.toString("utf-8"));
-        // Spoof hostname in Sportradar JS so licensing checks see the source domain
+        // Spoof hostname in Sportradar JS so licensing checks see the source domain.
+        // We prepend a variable definition and replace location.hostname/host with it,
+        // instead of inserting quoted strings which breaks JS when the token is inside a string literal.
         if (contentType.includes("javascript")) {
-          body = body.replace(/\blocation\.hostname\b/g, '"' + SOURCE_HOST + '"');
-          body = body.replace(/\blocation\.host\b(?!name)/g, '"' + SOURCE_HOST + '"');
+          body = body.replace(/\blocation\.hostname\b/g, '__cbh');
+          body = body.replace(/\blocation\.host\b(?!name)/g, '__cbh');
+          body = body.replace(/\blocation\.origin\b/g, '__cbo');
+          body = 'var __cbh="' + SOURCE_HOST + '",__cbo="' + SOURCE_ORIGIN + '";\n' + body;
         }
       } else {
         body = raw;
