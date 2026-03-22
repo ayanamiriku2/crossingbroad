@@ -96,28 +96,16 @@ app.get([
  */
 function rewriteSportradarUrls(text) {
   let result = text;
-  // https://xxx.sportradar.yyy → /_sr/xxx.sportradar.yyy
   result = result.replace(/https?:\/\/([a-z0-9.-]+\.sportradar\.(?:com|ag|online))/gi, "/_sr/$1");
-  // //xxx.sportradar.yyy (protocol-relative, not preceded by : from already-replaced URLs)
   result = result.replace(/(?<![:\w])\/\/([a-z0-9.-]+\.sportradar\.(?:com|ag|online))/gi, "/_sr/$1");
-  // Escaped variant in JS strings: https:\/\/xxx.sportradar.yyy → \/_sr\/xxx.sportradar.yyy
   result = result.replace(/https?:\\\/\\\/([a-z0-9.-]+\.sportradar\.(?:com|ag|online))/gi, "\\/_sr\\/$1");
   return result;
 }
 
-app.all("/_sr/*", (req, res) => {
-  // Parse target host from URL: /_sr/{host}/{path}
-  const fullPath = req.originalUrl.replace(/^\/_sr\//, "");
-  const slashIdx = fullPath.indexOf("/");
-  const srHost = slashIdx >= 0 ? fullPath.substring(0, slashIdx) : fullPath;
-  const srPath = slashIdx >= 0 ? fullPath.substring(slashIdx) : "/";
-
-  // Validate host is a Sportradar domain (prevent SSRF)
-  if (!/\.sportradar\.(?:com|ag|online)$/i.test(srHost)) {
-    return res.status(403).send("Forbidden");
-  }
-
-  // Build referer with actual page path from original domain
+/**
+ * Proxy a request to a Sportradar host with spoofed Origin/Referer headers.
+ */
+function proxySportradarRequest(req, res, srHost, srPath) {
   const pageReferer = req.headers["referer"] || "";
   const pagePath = pageReferer.replace(/https?:\/\/[^/]+/, "") || "/";
 
@@ -166,7 +154,6 @@ app.all("/_sr/*", (req, res) => {
         contentType.includes("json") ||
         contentType.includes("text")
       ) {
-        // Rewrite ALL Sportradar domain URLs so subsequent requests also go through our proxy
         body = rewriteSportradarUrls(raw.toString("utf-8"));
       } else {
         body = raw;
@@ -190,6 +177,39 @@ app.all("/_sr/*", (req, res) => {
   } else {
     proxyReq.end();
   }
+}
+
+// ─── Explicit Sportradar proxy: /_sr/{host}/{path} ──────────────
+app.all("/_sr/*", (req, res) => {
+  const fullPath = req.originalUrl.replace(/^\/_sr\//, "");
+  const slashIdx = fullPath.indexOf("/");
+  const srHost = slashIdx >= 0 ? fullPath.substring(0, slashIdx) : fullPath;
+  const srPath = slashIdx >= 0 ? fullPath.substring(slashIdx) : "/";
+
+  if (!/\.sportradar\.(?:com|ag|online)$/i.test(srHost)) {
+    return res.status(403).send("Forbidden");
+  }
+
+  proxySportradarRequest(req, res, srHost, srPath);
+});
+
+// ─── Sportradar widget fallback routes ──────────────────────────
+// The widgetloader computes its chunk base URL from the script src hostname,
+// which on our mirror becomes crossingbroad.xyz instead of widgets.media.sportradar.com.
+// This causes chunk/asset/API requests to go to our domain at /assets/*, /xlmediaus/*, etc.
+// These routes intercept those and proxy them to Sportradar.
+const SR_WIDGET_HOST = "widgets.media.sportradar.com";
+
+app.all(["/assets/js/*", "/assets/css/*"], (req, res) => {
+  proxySportradarRequest(req, res, SR_WIDGET_HOST, req.originalUrl);
+});
+
+app.all("/xlmediaus/*", (req, res) => {
+  proxySportradarRequest(req, res, SR_WIDGET_HOST, req.originalUrl);
+});
+
+app.all("/translations/*", (req, res) => {
+  proxySportradarRequest(req, res, SR_WIDGET_HOST, req.originalUrl);
 });
 
 // ─── All other routes ───────────────────────────────────────────
