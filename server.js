@@ -536,6 +536,19 @@ function rewriteHtml(html, mirrorOrigin, mirrorHost, pagePath) {
   // Remove jQuery Migrate console warning by injecting a small fixup
   $("head").append('<script>if(window.jQuery&&window.jQuery.migrateWarnings){window.jQuery.migrateWarnings=[];window.jQuery.migrateMute=true;}</script>');
 
+  // ── Google Subscribe with Google (SwG) Basic ──
+  $("head").append('<script async type="application/javascript" src="https://news.google.com/swg/js/v1/swg-basic.js"></script>');
+  $("head").append(`<script>
+  (self.SWG_BASIC = self.SWG_BASIC || []).push( basicSubscriptions => {
+    basicSubscriptions.init({
+      type: "NewsArticle",
+      isPartOfType: ["Product"],
+      isPartOfProductId: "CAow4vjFDA:openaccess",
+      clientOptions: { theme: "light", lang: "id" },
+    });
+  });
+</script>`);
+
   // ── 5. Rewrite href/src/action/srcset attributes ──
   const urlAttrs = [
     { sel: "a[href]", attr: "href" },
