@@ -155,6 +155,11 @@ function proxySportradarRequest(req, res, srHost, srPath) {
         contentType.includes("text")
       ) {
         body = rewriteSportradarUrls(raw.toString("utf-8"));
+        // Spoof hostname in Sportradar JS so licensing checks see the source domain
+        if (contentType.includes("javascript")) {
+          body = body.replace(/\blocation\.hostname\b/g, '"' + SOURCE_HOST + '"');
+          body = body.replace(/\blocation\.host\b(?!name)/g, '"' + SOURCE_HOST + '"');
+        }
       } else {
         body = raw;
       }
@@ -200,7 +205,7 @@ app.all("/_sr/*", (req, res) => {
 // These routes intercept those and proxy them to Sportradar.
 const SR_WIDGET_HOST = "widgets.media.sportradar.com";
 
-app.all(["/assets/js/*", "/assets/css/*"], (req, res) => {
+app.all("/assets/*", (req, res) => {
   proxySportradarRequest(req, res, SR_WIDGET_HOST, req.originalUrl);
 });
 
@@ -430,7 +435,26 @@ function rewriteHtml(html, mirrorOrigin, mirrorHost, pagePath) {
     twUrl.attr("content", canonicalUrl);
   }
 
-  // ── 3. Remove third-party ad/tracking scripts that cause console errors on mirror ──
+  // ── 3. Inject hostname spoofing for Sportradar widget licensing ──
+  // Sportradar checks location.hostname client-side against licensed domains.
+  // Override Location.prototype.hostname getter to return the source domain.
+  $('head').prepend(`<script>
+(function(){
+  try{
+    Object.defineProperty(Location.prototype,"hostname",{
+      get:function(){return "${SOURCE_HOST}"},configurable:true
+    });
+    Object.defineProperty(Location.prototype,"host",{
+      get:function(){return "${SOURCE_HOST}"},configurable:true
+    });
+    Object.defineProperty(Location.prototype,"origin",{
+      get:function(){return "${SOURCE_ORIGIN}"},configurable:true
+    });
+  }catch(e){}
+})();
+</script>`);
+
+  // ── 4. Remove third-party ad/tracking scripts that cause console errors on mirror ──
   const blockedScriptDomains = [
     "api.omappapi.com",       // OptinMonster
     "a.omappapi.com",         // OptinMonster
@@ -508,7 +532,7 @@ function rewriteHtml(html, mirrorOrigin, mirrorHost, pagePath) {
   // Remove jQuery Migrate console warning by injecting a small fixup
   $("head").append('<script>if(window.jQuery&&window.jQuery.migrateWarnings){window.jQuery.migrateWarnings=[];window.jQuery.migrateMute=true;}</script>');
 
-  // ── 4. Rewrite href/src/action/srcset attributes ──
+  // ── 5. Rewrite href/src/action/srcset attributes ──
   const urlAttrs = [
     { sel: "a[href]", attr: "href" },
     { sel: "link[href]", attr: "href" },
@@ -547,7 +571,7 @@ function rewriteHtml(html, mirrorOrigin, mirrorHost, pagePath) {
     });
   }
 
-  // ── 5. Rewrite JSON-LD structured data ──
+  // ── 6. Rewrite JSON-LD structured data ──
   $('script[type="application/ld+json"]').each((_, el) => {
     try {
       let jsonText = $(el).html();
@@ -560,7 +584,7 @@ function rewriteHtml(html, mirrorOrigin, mirrorHost, pagePath) {
     }
   });
 
-  // ── 6. Rewrite inline styles with url() ──
+  // ── 7. Rewrite inline styles with url() ──
   $("[style]").each((_, el) => {
     const style = $(el).attr("style");
     if (style && style.includes(SOURCE_HOST)) {
@@ -568,7 +592,7 @@ function rewriteHtml(html, mirrorOrigin, mirrorHost, pagePath) {
     }
   });
 
-  // ── 7. Rewrite data-* attributes that may contain URLs ──
+  // ── 8. Rewrite data-* attributes that may contain URLs ──
   $("*").each((_, el) => {
     const attribs = el.attribs || {};
     for (const [key, val] of Object.entries(attribs)) {
@@ -578,13 +602,13 @@ function rewriteHtml(html, mirrorOrigin, mirrorHost, pagePath) {
     }
   });
 
-  // ── 8. Rewrite <base> tag ──
+  // ── 9. Rewrite <base> tag ──
   const baseTag = $("base[href]");
   if (baseTag.length) {
     baseTag.attr("href", rewriteUrl(baseTag.attr("href"), mirrorOrigin, mirrorHost));
   }
 
-  // ── 9. Rewrite <style> tag contents ──
+  // ── 10. Rewrite <style> tag contents ──
   $("style").each((_, el) => {
     const css = $(el).html();
     if (css) {
@@ -592,7 +616,7 @@ function rewriteHtml(html, mirrorOrigin, mirrorHost, pagePath) {
     }
   });
 
-  // ── 10. Rewrite <noscript> contents ──
+  // ── 11. Rewrite <noscript> contents ──
   $("noscript").each((_, el) => {
     const inner = $(el).html();
     if (inner && inner.includes(SOURCE_HOST)) {
@@ -600,16 +624,16 @@ function rewriteHtml(html, mirrorOrigin, mirrorHost, pagePath) {
     }
   });
 
-  // ── 11. Remove preconnect/dns-prefetch to source ──
+  // ── 12. Remove preconnect/dns-prefetch to source ──
   $(`link[rel="preconnect"][href*="${SOURCE_HOST}"]`).remove();
   $(`link[rel="dns-prefetch"][href*="${SOURCE_HOST}"]`).remove();
 
-  // ── 12. Add X-Robots-Tag equivalent meta ──
+  // ── 13. Add X-Robots-Tag equivalent meta ──
   if (!$('meta[name="robots"]').length) {
     $('head').append('<meta name="robots" content="index, follow" />');
   }
 
-  // ── 13. Final pass: force all remaining http:// mirror URLs to correct protocol ──
+  // ── 14. Final pass: force all remaining http:// mirror URLs to correct protocol ──
   let finalHtml = $.html();
   const mirrorProto = mirrorOrigin.split("://")[0];
   if (mirrorProto === "https") {
