@@ -86,6 +86,112 @@ app.get([
   proxyAndRewrite(req, res, true);
 });
 
+// ─── Sportradar widget proxy (domain-license bypass) ────────────
+// URL format: /_sr/{sportradar-host}/{path}
+// Proxies the request to the specified Sportradar host with original domain headers
+// so widgets pass the Sportradar license check.
+
+/**
+ * Rewrite all Sportradar domain URLs in text to go through our /_sr/ proxy.
+ */
+function rewriteSportradarUrls(text) {
+  let result = text;
+  // https://xxx.sportradar.yyy → /_sr/xxx.sportradar.yyy
+  result = result.replace(/https?:\/\/([a-z0-9.-]+\.sportradar\.(?:com|ag|online))/gi, "/_sr/$1");
+  // //xxx.sportradar.yyy (protocol-relative, not preceded by : from already-replaced URLs)
+  result = result.replace(/(?<![:\w])\/\/([a-z0-9.-]+\.sportradar\.(?:com|ag|online))/gi, "/_sr/$1");
+  // Escaped variant in JS strings: https:\/\/xxx.sportradar.yyy → \/_sr\/xxx.sportradar.yyy
+  result = result.replace(/https?:\\\/\\\/([a-z0-9.-]+\.sportradar\.(?:com|ag|online))/gi, "\\/_sr\\/$1");
+  return result;
+}
+
+app.all("/_sr/*", (req, res) => {
+  // Parse target host from URL: /_sr/{host}/{path}
+  const fullPath = req.originalUrl.replace(/^\/_sr\//, "");
+  const slashIdx = fullPath.indexOf("/");
+  const srHost = slashIdx >= 0 ? fullPath.substring(0, slashIdx) : fullPath;
+  const srPath = slashIdx >= 0 ? fullPath.substring(slashIdx) : "/";
+
+  // Validate host is a Sportradar domain (prevent SSRF)
+  if (!/\.sportradar\.(?:com|ag|online)$/i.test(srHost)) {
+    return res.status(403).send("Forbidden");
+  }
+
+  // Build referer with actual page path from original domain
+  const pageReferer = req.headers["referer"] || "";
+  const pagePath = pageReferer.replace(/https?:\/\/[^/]+/, "") || "/";
+
+  const headers = {
+    host: srHost,
+    "user-agent": req.headers["user-agent"] || "Mozilla/5.0",
+    accept: req.headers["accept"] || "*/*",
+    "accept-language": req.headers["accept-language"] || "en-US,en;q=0.9",
+    referer: SOURCE_ORIGIN + pagePath,
+    origin: SOURCE_ORIGIN,
+    "accept-encoding": "identity",
+  };
+
+  const options = {
+    hostname: srHost,
+    port: 443,
+    path: srPath,
+    method: req.method,
+    headers,
+  };
+
+  const proxyReq = https.request(options, (proxyRes) => {
+    let chunks = [];
+    proxyRes.on("data", (chunk) => chunks.push(chunk));
+    proxyRes.on("end", () => {
+      const raw = Buffer.concat(chunks);
+      const contentType = (proxyRes.headers["content-type"] || "").toLowerCase();
+
+      const respHeaders = {};
+      const skipHeaders = new Set([
+        "content-encoding", "content-length", "transfer-encoding",
+        "connection", "keep-alive", "set-cookie",
+        "access-control-allow-origin",
+      ]);
+
+      for (const [key, val] of Object.entries(proxyRes.headers)) {
+        if (skipHeaders.has(key)) continue;
+        respHeaders[key] = val;
+      }
+
+      respHeaders["access-control-allow-origin"] = "*";
+
+      let body;
+      if (
+        contentType.includes("javascript") ||
+        contentType.includes("json") ||
+        contentType.includes("text")
+      ) {
+        // Rewrite ALL Sportradar domain URLs so subsequent requests also go through our proxy
+        body = rewriteSportradarUrls(raw.toString("utf-8"));
+      } else {
+        body = raw;
+      }
+
+      const bodyBuf = typeof body === "string" ? Buffer.from(body, "utf-8") : body;
+      respHeaders["content-length"] = bodyBuf.length;
+
+      for (const [k, v] of Object.entries(respHeaders)) res.setHeader(k, v);
+      res.status(proxyRes.statusCode).send(bodyBuf);
+    });
+  });
+
+  proxyReq.on("error", (err) => {
+    console.error("SR proxy error:", err.message);
+    res.status(502).send("Bad Gateway");
+  });
+
+  if (req.method !== "GET" && req.method !== "HEAD") {
+    req.pipe(proxyReq);
+  } else {
+    proxyReq.end();
+  }
+});
+
 // ─── All other routes ───────────────────────────────────────────
 app.use((req, res) => {
   proxyAndRewrite(req, res, false);
@@ -276,6 +382,9 @@ function rewriteXml(xml, mirrorOrigin, mirrorHost) {
 function rewriteHtml(html, mirrorOrigin, mirrorHost, pagePath) {
   // First, do global text-level replacements
   let rewritten = rewriteGenericText(html, mirrorOrigin, mirrorHost);
+
+  // Rewrite Sportradar widget URLs to use our proxy (fixes "Domain not licensed" error)
+  rewritten = rewriteSportradarUrls(rewritten);
 
   const $ = cheerio.load(rewritten, { decodeEntities: false });
 
